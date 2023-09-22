@@ -1,0 +1,351 @@
+---
+title: "Time series analysis report"
+author: "-"
+date: "2023-06-16"
+output: 
+  word_document: 
+    fig_width: 8
+    fig_height: 6
+---
+
+# 1. Introduction
+
+
+The data comes from https://www.kaggle.com/datasets/denis6715/marketing-sales. This is a very new dataset, last updated 2 months ago. One disadvantage of this data set is that the author has very little description of him, and can only understand the meaning of the data set through the variable name. But I don't think this affects our analysis of the data. The data includes a total of 14 columns: date (transaction time, from = January 1, 2020 to September 30, 2020), source (the source of the transaction includes Google, yandex, etc.) medium (the medium used when the transaction occurred) ), delivery_available (whether it can be delivered, mainly including the two categories of yes and no data), device_type (the type of device used, mainly including PC and mobile, promo_activated (whether it is a promotional product, including the two categories of True and False), filter_used (Whether a filter is used when shopping), pageviews (page views), visits (page visits), productClick (product clicks), addToCart (number of times added to the shopping cart), checkout (number of times to enter the checkout) , transactions (commodity transactions) and revenue (income, If the transaction has not been completed, then the value is 0).
+
+I'm going to use this dataset to predict the daily revenue and whether or not a transaction occurred.
+
+# 2. Data analysis
+
+
+```{r,include=FALSE}
+library(tidyverse)
+```
+
+
+```{r}
+sales <- read.csv('sales.csv')
+head(sales)
+```
+
+You can see that there are several pieces of data every day, and I plan to analyze this data from two angles. One is to combine daily transactions, calculate the total daily income, and then build a time series model to predict this total income. The other is to analyze directly in the form of raw data, using logistic and decision tree to predict whether a transaction will occur.
+
+## 2.1 Analysis of daily revenue
+
+### 2.1.1 ARMA model
+
+First, according to the daily combined income, get the total daily income:
+
+```{r}
+total <- sales %>% group_by(date) %>% summarise(total = sum(revenue))
+
+daily_revenue <- ts(total$total, start = c(2020, 1, 1), frequency = 365)
+```
+
+
+
+```{r}
+plot(daily_revenue)
+```
+
+It can be seen that there is no obvious trend in this time series, but there are more frequent up and down fluctuations. And the value of this data is very large, considering the maximum and minimum value transformation of the data.
+
+```{r}
+min_rev <- min(daily_revenue)
+max_rev <- max(daily_revenue)
+std_daily_revenue <- (daily_revenue-min_rev)/(max_rev - min_rev)
+plot(std_daily_revenue)
+```
+
+
+It can be seen that this transformation does not change the distribution form of the data, and the data after normalization still has the same shape as the previous data.
+
+
+```{r}
+par(mar=c(3, 5, 1, 1), mfrow=c(1,2))
+acf(std_daily_revenue)
+
+pacf(std_daily_revenue)
+```
+
+
+From the partial autocorrelation coefficient graph, there is an obvious partial autocorrelation between the data and the first three lags, so consider building an AR(3) model.
+
+
+
+```{r}
+ar3 = arima(std_daily_revenue, c(3, 0, 0))
+
+Box.test(ar3$residuals, 6)
+```
+
+It can be seen that the result of the box test is not good. There is still a correlation between the residual error of the model and the 6th order lag. Consider increasing the order and difference of the model to improve the model.
+
+
+```{r}
+ts.plot(ar3$residuals)
+```
+
+
+It can be seen that the residuals fluctuate around 0, but the data fluctuates in a large range in some places, considering the existence of heteroscedasticity. The GARCH model can be added in subsequent modeling.
+
+
+```{r}
+ar3
+(ar3$coef/sqrt(diag(ar3$var.coef)))
+```
+
+If 1.645 is used as the critical value, it can be seen that only the coefficient of ar2 is not significant, so the established AR(3) model is:
+
+
+$$
+daily\_revenue_t = 0.2213 + 0.534\times daily\_revenue_{t-1} -0.2791\times  daily\_revenue_{t-3}
+$$
+
+### 2.1.2 ARIMA model
+
+In order to optimize the model, the following ARIMA(12,1,1) model is established:
+
+```{r}
+arima12 = arima(std_daily_revenue, c(12, 1, 1))
+
+Box.test(arima12$residuals, 12)
+```
+
+It can be seen that the result of the box test of this model is no longer significant, that is to say, there is no autocorrelation in the residuals of the model.
+
+
+```{r}
+ts.plot(arima12$residuals)
+```
+
+
+It can be seen that the residuals of the model still have the problem of heteroscedasticity.
+
+
+```{r}
+arima12
+(arima12$coef/sqrt(diag(arima12$var.coef)))
+```
+
+By testing all the coefficients of this model, it can be found that some of the coefficients are not significant when the critical value is selected as 1.645. Consider removing these insignificant coefficients from this model, then build the model:
+
+
+```{r, warning=FALSE}
+fixed_i = c(0,0,NA,NA,NA,0,0,NA,NA,NA,NA,NA,NA)
+arima12_sparse = arima(std_daily_revenue, order=c(12,1,1), fixed=fixed_i)
+arima12_sparse
+```
+
+```{r}
+(arima12_sparse$coef[-c(1,2,6,7)]/sqrt(diag(arima12_sparse$var.coef)))
+```
+
+It can be found that after removing these insignificant coefficients, the remaining coefficients are all significant.
+
+The built model is:
+
+
+$$
+Y_t-Y_{t-1}=-4.5541(Y_{t-3}-Y_{t-4})-4.9741(Y_{t-4}-Y_{t-5})-4.7865(Y_{t-5}-Y_{t-6})
+-3.0816(Y_{t-8}-Y_{t-9})-4.8989(Y_{t-9}-Y_{t-10}) -4.2846(Y_{t-10}-Y_{t-11}) -2.6598(Y_{t-11}-Y_{t-12}) -2.6995(Y_{t-12}-Y_{t-13})-15.6181\varepsilon_{t-1}+\varepsilon_{t}
+$$
+
+Let's use this model to make a 5-step forecast of total daily revenue:
+
+
+```{r}
+library(forecast)
+
+forecasrt12 = forecast(arima12_sparse, 5)
+
+plot(forecasrt12)
+```
+
+It can be seen that the prediction effect of the model is good, which basically conforms to the previous fluctuation law.
+
+
+## 2.2 Analysis transactions
+
+For the transaction prediction, I am more concerned about whether this person is making a transaction after browsing, or what factors affect the transaction, so I directly use this daily data for analysis.
+
+First, transform the data. If the transaction is completed, it will be recorded as 1, and if there is no transaction, it will be recorded as 0. Here I don't care about the number of transactions, only whether there are transactions.
+
+```{r}
+sales$transaction <- ifelse(sales$transactions>0, 1, 0)
+```
+
+Remove the three variables date, transactions, and revenue from the data set. The first is the date, which is not very helpful for our analysis, unless it is a shopping festival such as Black Friday, which may make transactions happen more frequently. The variable transaction whether we make a deal is created based on transactions, so transactions also need to be deleted. revenue is also 0 when there is no transaction, so it should also be removed.
+
+
+```{r}
+sub_sales <- sales %>% select(-c(date, transactions, revenue))
+```
+
+
+It can be seen that the better point of this data set is that there are no missing values.
+
+
+```{r}
+sum(is.na(sub_sales))
+```
+
+### 2.2.1 Logistic model
+
+First, divide the training set and test set according to the proportion of transaction, the proportion of training set is 70%, and the proportion of test set is 30%.
+
+
+```{r}
+library(caTools)
+
+set.seed(202306)
+
+split <- sample.split(sub_sales$transaction, SplitRatio = 0.7)
+train <- subset(sub_sales, split == TRUE)
+test <- subset(sub_sales, split == FALSE)
+```
+
+
+Add all variables to the model to model the logistic model:
+
+
+```{r}
+model <- glm(transaction ~., data = train, family = "binomial")
+
+predictions <- predict(model, newdata = test, type = "response")
+
+predicted_classes <- ifelse(predictions > 0.5, 1, 0)
+```
+
+
+The calculated accuracy of this model in the test set is 86.05%, which is a very high accuracy rate.
+
+```{r}
+accuracy <- sum(predicted_classes == test$transaction) / length(test$transaction)
+accuracy
+```
+
+
+```{r}
+library(pROC)
+
+roc_obj <- roc(test$transaction, predictions)
+
+plot(roc_obj, main = "ROC Curve", xlab = "False Positive Rate", ylab = "True Positive Rate")
+
+
+auc <- auc(roc_obj)
+
+text(0.7, 0.2, paste0("AUC = ", round(auc, 2)), cex = 1.2)
+```
+
+Further drawing its ROC diagram and calculating AUC, it can be found that the AUC of this model is 0.93. This value is very high, which shows that the fitting effect of this model is very good.
+
+```{r, warning=FALSE}
+library(texreg)
+
+screenreg(model)
+```
+
+It can be found that some coefficients in the model are not significant, so consider using the stepwise regression method to eliminate some variables to build a new model.
+
+```{r, include=FALSE}
+step(model)
+```
+
+
+```{r}
+model2 <- glm(formula = transaction ~ source + medium + delivery_available + 
+    device_type + filter_used + visits + productClick + addToCart + 
+    checkout, family = "binomial", data = train)
+```
+
+Calculate the accuracy and AUC of the new model separately:
+
+```{r}
+predictions <- predict(model2, newdata = test, type = "response")
+
+predicted_classes <- ifelse(predictions > 0.5, 1, 0)
+
+accuracy <- sum(predicted_classes == test$transaction) / length(test$transaction)
+accuracy
+
+roc_obj <- roc(test$transaction, predictions)
+
+plot(roc_obj, main = "ROC Curve", xlab = "False Positive Rate", ylab = "True Positive Rate")
+
+
+auc <- auc(roc_obj)
+
+text(0.7, 0.2, paste0("AUC = ", round(auc, 2)), cex = 1.2)
+```
+
+It can be seen that the accuracy of this model on the test set is 86.07%, which is slightly improved compared to the previous model. Its AUC is 0.93 and has not changed.
+
+The final logistic model is as follows:
+
+```{r}
+screenreg(model2)
+```
+
+
+You can see that visits, productClick, addToCart, and checkout are all prominent. eLama, facebook, Google, etc. in the source are notable, and we can increase investment in these platforms. The no data and yes in delivery_available are also significant, and the coefficients are all positive, which shows that people are not inclined to buy free shipping. It can be seen that the cpc in medium is relatively significant, and you can consider increasing your investment in it.
+
+
+
+### 2.2.2 Decision Tree
+
+Next, a decision tree model is established for this classification problem for analysis.
+
+```{r}
+library(tree)
+library(pROC)
+
+model <- tree(factor(transaction) ~., data = train)
+```
+
+Draw a decision tree：
+
+```{r}
+plot(model)
+text(model, pretty = 0)
+```
+
+It can be seen that the main variables of this decision tree model are checkout, visits, productClick and pageviews.
+
+
+```{r}
+predictions <- predict(model, newdata = test, type = "class")
+```
+
+
+
+```{r}
+accuracy <- sum(predictions == test$transaction) / length(test$transaction)
+accuracy
+```
+
+Through calculation, the accuracy rate of this model is 86.77%, which is slightly improved compared with the logistic model.
+
+
+
+```{r}
+auc <- roc(test$transaction, as.numeric(predictions))$auc
+
+roc_obj <- roc(test$transaction, as.numeric(predictions))
+
+plot(roc_obj, main = "ROC Curve", xlab = "False Positive Rate", ylab = "True Positive Rate")
+
+text(0.7, 0.2, paste0("AUC = ", round(auc, 2)), cex = 1.2)
+```
+
+Further draw the ROC diagram of the model and calculate the AUC, the AUC of the model can be obtained as 0.8, which is lower than the logistic model.
+
+
+# 3. Conclusion
+
+
+We use the ARIMA(12,1,1) model to realize the prediction of daily income, and achieved good results. The prediction of whether to generate a transaction is realized through the logistic model and the Decision Tree model. The decision tree model has no obvious advantage over the logistic model. Although its accuracy is slightly higher, its AUC is much lower than that of the logistic model. Through the logistic model, I found some variables that affect transactions, including continuous variables visits, productClick, addToCart, and checkout. In categorical variables such as source, facebook and Google are very significant, and we can increase the advertising investment on these platforms to increase transactions.
+
+
+
